@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		140A201E2FD43068006AD911 /* ID3TagEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 140A201D2FD43068006AD911 /* ID3TagEditor */; };
+		140A20242FD47DB0006AD911 /* AudioMarker in Frameworks */ = {isa = PBXBuildFile; productRef = 140A20232FD47DB0006AD911 /* AudioMarker */; };
+		140A20272FD49AD0006AD911 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 140A20262FD49AD0006AD911 /* Api */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +29,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				140A20272FD49AD0006AD911 /* Api in Frameworks */,
+				140A20242FD47DB0006AD911 /* AudioMarker in Frameworks */,
 				140A201E2FD43068006AD911 /* ID3TagEditor in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -71,6 +75,8 @@
 			name = LyricEditor;
 			packageProductDependencies = (
 				140A201D2FD43068006AD911 /* ID3TagEditor */,
+				140A20232FD47DB0006AD911 /* AudioMarker */,
+				140A20262FD49AD0006AD911 /* Api */,
 			);
 			productName = LyricEditor;
 			productReference = 140A200A2FD36F68006AD911 /* LyricEditor.app */;
@@ -102,6 +108,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				140A201C2FD43068006AD911 /* XCRemoteSwiftPackageReference "ID3TagEditor" */,
+				140A20222FD47DB0006AD911 /* XCRemoteSwiftPackageReference "swift-audio-marker" */,
+				140A20252FD49AD0006AD911 /* XCLocalSwiftPackageReference "../GeneratedApi/Generated/Api" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 140A200B2FD36F68006AD911 /* Products */;
@@ -342,6 +350,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		140A20252FD49AD0006AD911 /* XCLocalSwiftPackageReference "../GeneratedApi/Generated/Api" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../GeneratedApi/Generated/Api;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		140A201C2FD43068006AD911 /* XCRemoteSwiftPackageReference "ID3TagEditor" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -351,6 +366,14 @@
 				minimumVersion = 5.5.0;
 			};
 		};
+		140A20222FD47DB0006AD911 /* XCRemoteSwiftPackageReference "swift-audio-marker" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/atelier-socle/swift-audio-marker";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -358,6 +381,15 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 140A201C2FD43068006AD911 /* XCRemoteSwiftPackageReference "ID3TagEditor" */;
 			productName = ID3TagEditor;
+		};
+		140A20232FD47DB0006AD911 /* AudioMarker */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 140A20222FD47DB0006AD911 /* XCRemoteSwiftPackageReference "swift-audio-marker" */;
+			productName = AudioMarker;
+		};
+		140A20262FD49AD0006AD911 /* Api */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Api;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

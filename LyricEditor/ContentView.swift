@@ -9,6 +9,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AVFoundation
 import CoreImage
+import AudioMarker
+import Api
 
 // MARK: - Theme
 
@@ -68,7 +70,7 @@ private struct TrackInfo: Equatable {
     }
 }
 
-private struct LyricLine: Identifiable, Equatable {
+private struct LyricItem: Identifiable, Equatable {
     let id = UUID()
     var time: TimeInterval
     var text: String
@@ -79,7 +81,7 @@ private struct LyricLine: Identifiable, Equatable {
 private final class AppState {
     var stage: Stage = .empty
     var track: TrackInfo?
-    var lyrics: [LyricLine] = []
+    var lyrics: [LyricItem] = []
     var playhead: TimeInterval = 0 {
         didSet {
             guard !suppressSeek, let p = player else { return }
@@ -101,13 +103,55 @@ private final class AppState {
     var showManual: Bool = false
     var isDirty: Bool = false
     var showUndo: Bool = false
+    var errorMessage: String? = nil
+    var manualText: String = ""
     var ambientColors: [Color] = []
-    @ObservationIgnored private var lastDeleted: (line: LyricLine, index: Int)?
+    @ObservationIgnored private var lastDeleted: (line: LyricItem, index: Int)?
     @ObservationIgnored private var undoTask: Task<Void, Never>?
+    @ObservationIgnored private var errorTask: Task<Void, Never>?
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var scopedURL: URL?
     @ObservationIgnored private var displayTask: Task<Void, Never>?
+    @ObservationIgnored private var interruptionTask: Task<Void, Never>?
     @ObservationIgnored private var suppressSeek: Bool = false
+
+    init() {
+        startListeningForInterruptions()
+    }
+
+    private func startListeningForInterruptions() {
+        interruptionTask = Task { @MainActor in
+            for await note in NotificationCenter.default.notifications(named: AVAudioSession.interruptionNotification) {
+                guard let info = note.userInfo,
+                      let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: raw)
+                else { continue }
+                switch type {
+                case .began:
+                    if isPlaying { isPlaying = false }
+                case .ended:
+                    if let optRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+                        let opts = AVAudioSession.InterruptionOptions(rawValue: optRaw)
+                        if opts.contains(.shouldResume) { isPlaying = true }
+                    }
+                @unknown default:
+                    break
+                }
+            }
+        }
+    }
+
+    func showError(_ message: String) {
+        errorTask?.cancel()
+        withAnimation(.spring(duration: 0.4, bounce: 0.25)) {
+            errorMessage = message
+        }
+        errorTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.smooth(duration: 0.3)) { errorMessage = nil }
+        }
+    }
 
     var totalDuration: TimeInterval {
         if let d = track?.duration, d > 0 { return d }
@@ -239,6 +283,10 @@ private final class AppState {
 
         let colors = foundArtwork?.ambientColors() ?? []
 
+        let existingSYLT: [LyricItem]? = await Task.detached(priority: .userInitiated) {
+            readSYLT(from: url)
+        }.value
+
         await MainActor.run {
             if let t = foundTitle { self.track?.title = t }
             if let a = foundArtist { self.track?.artist = a }
@@ -246,40 +294,87 @@ private final class AppState {
             withAnimation(.smooth(duration: 1.0)) {
                 self.ambientColors = colors
             }
+            if let existingSYLT, self.stage == .loaded {
+                self.lyrics = existingSYLT
+                self.normalize()
+                self.playhead = 0
+                self.isDirty = false
+                withAnimation(.spring(duration: 0.7, bounce: 0.22)) {
+                    self.stage = .review
+                }
+            }
         }
     }
 
     func runAI() async {
+        guard let track else { return }
         withAnimation(.smooth(duration: 0.5)) { stage = .processing }
-        try? await Task.sleep(for: .seconds(2.4))
-        lyrics = LyricLine.sample
-        playhead = 0
-        isPlaying = true
-        isDirty = false
-        withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
+        let aligned = await LyricsAPI.sync(audioURL: track.fileURL, lyrics: nil)
+        if let aligned, !aligned.isEmpty {
+            lyrics = aligned
+            playhead = 0
+            isPlaying = true
+            isDirty = false
+            withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
+        } else {
+            withAnimation(.spring(duration: 0.5, bounce: 0.18)) { stage = .loaded }
+            showError("Couldn't reach the AI. Try again, or use \"I have the lyrics\".")
+        }
     }
 
-    func alignPasted(_ raw: String) {
-        let cleaned = raw
-            .split(whereSeparator: { $0.isNewline })
+    private func parseLyrics(_ raw: String) -> [String] {
+        raw.split(whereSeparator: { $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        guard !cleaned.isEmpty else { return }
-        let estimatedDuration: TimeInterval = 180
-        let step = estimatedDuration / Double(max(cleaned.count, 1))
-        lyrics = cleaned.enumerated().map { i, t in
-            LyricLine(time: Double(i) * step, text: t)
+    }
+
+    private func placeholderEvenDistribution(_ lines: [String]) -> [LyricItem] {
+        let estimated: TimeInterval = totalDuration > 0 ? totalDuration : 180
+        let step = estimated / Double(max(lines.count, 1))
+        return lines.enumerated().map { i, t in
+            LyricItem(time: Double(i) * step, text: t)
         }
+    }
+
+    /// Mode 2: user provides lyrics, AI server forced-aligns timings.
+    func alignWithAI(_ raw: String) async {
+        let cleaned = parseLyrics(raw)
+        guard !cleaned.isEmpty, let track else { return }
+        showManual = false
+        withAnimation(.smooth(duration: 0.5)) { stage = .processing }
+        let aligned = await LyricsAPI.sync(
+            audioURL: track.fileURL,
+            lyrics: cleaned.joined(separator: "\n")
+        )
+        if let aligned, !aligned.isEmpty {
+            lyrics = aligned
+            playhead = 0
+            isPlaying = true
+            isDirty = false
+            manualText = ""
+            withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
+        } else {
+            withAnimation(.spring(duration: 0.5, bounce: 0.18)) { stage = .loaded }
+            showError("Couldn't reach the AI. Your lyrics are still here — try again.")
+        }
+    }
+
+    /// Mode 3: user provides lyrics, takes timing into their own hands.
+    func manualAlign(_ raw: String) {
+        let cleaned = parseLyrics(raw)
+        guard !cleaned.isEmpty else { return }
+        lyrics = placeholderEvenDistribution(cleaned)
         playhead = 0
         showManual = false
         isDirty = false
+        manualText = ""
         withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
     }
 
     @discardableResult
-    func addLine(at time: TimeInterval) -> LyricLine.ID {
+    func addLine(at time: TimeInterval) -> LyricItem.ID {
         let clamped = max(0, min(totalDuration, time))
-        let new = LyricLine(time: clamped, text: "")
+        let new = LyricItem(time: clamped, text: "")
         lyrics.append(new)
         withAnimation(.spring(duration: 0.45, bounce: 0.2)) {
             normalize()
@@ -288,7 +383,7 @@ private final class AppState {
         return new.id
     }
 
-    func deleteLine(id: LyricLine.ID) {
+    func deleteLine(id: LyricItem.ID) {
         guard let idx = lyrics.firstIndex(where: { $0.id == id }) else { return }
         lastDeleted = (lyrics[idx], idx)
         withAnimation(.spring(duration: 0.4, bounce: 0.15)) {
@@ -323,12 +418,27 @@ private final class AppState {
 
     func save() {
         normalize()
+        guard let url = track?.fileURL else { return }
+        let snapshot = lyrics
         isDirty = false
-        // Real impl: write SYLT frame back to ID3 tag on track.fileURL.
-        withAnimation(.smooth(duration: 0.4)) { stage = .saved }
         Task {
-            try? await Task.sleep(for: .seconds(1.4))
-            await MainActor.run { reset() }
+            let result = await Task.detached(priority: .userInitiated) {
+                writeSYLT(to: url, lines: snapshot)
+            }.value
+            await MainActor.run {
+                switch result {
+                case .success:
+                    withAnimation(.smooth(duration: 0.4)) { self.stage = .saved }
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.4))
+                        await MainActor.run { self.reset() }
+                    }
+                case .failure(let error):
+                    self.isDirty = true
+                    print("[save] \(error)")
+                    self.showError("Save failed: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
@@ -351,8 +461,8 @@ private final class AppState {
     }
 }
 
-private extension LyricLine {
-    static let sample: [LyricLine] = [
+private extension LyricItem {
+    static let sample: [LyricItem] = [
         .init(time: 0,    text: "We could be anything we want to be"),
         .init(time: 4.2,  text: "Quiet on the wire, loud in the dream"),
         .init(time: 8.6,  text: "And the night keeps holding what we leave behind"),
@@ -383,6 +493,18 @@ struct ContentView: View {
             if app.stage == .saved {
                 SavedOverlay()
                     .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .top) {
+            if let msg = app.errorMessage {
+                ErrorBanner(text: msg) {
+                    withAnimation(.smooth(duration: 0.25)) {
+                        app.errorMessage = nil
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .preferredColorScheme(.dark)
@@ -447,7 +569,7 @@ struct ContentView: View {
 private struct DropView: View {
     @Environment(AppState.self) private var app
     @State private var pulsing = false
-    @State private var showImporter = false
+    @State private var showPicker = false
 
     var body: some View {
         VStack {
@@ -455,7 +577,7 @@ private struct DropView: View {
 
             Button {
                 UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                showImporter = true
+                showPicker = true
             } label: {
                 ZStack {
                     Circle()
@@ -497,15 +619,56 @@ private struct DropView: View {
                 .foregroundStyle(Theme.secondary)
                 .padding(.bottom, 56)
         }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: [.audio, .mp3],
-            allowsMultipleSelection: false
-        ) { result in
-            if case let .success(urls) = result, let url = urls.first {
-                _ = url.startAccessingSecurityScopedResource()
-                app.loadFile(url)
-            }
+        .sheet(isPresented: $showPicker) {
+            AudioFilePicker(
+                onPick: { url in
+                    showPicker = false
+                    app.loadFile(url)
+                },
+                onCancel: { showPicker = false }
+            )
+            .ignoresSafeArea()
+        }
+    }
+}
+
+private struct AudioFilePicker: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+    let onCancel: () -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.audio, .mp3],
+            asCopy: false
+        )
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick, onCancel: onCancel)
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        let onCancel: () -> Void
+
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onPick = onPick
+            self.onCancel = onCancel
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { onCancel(); return }
+            onPick(url)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCancel()
         }
     }
 }
@@ -607,7 +770,7 @@ private struct TrackHomeView: View {
             UISelectionFeedbackGenerator().selectionChanged()
             app.showManual = true
         } label: {
-            Text("Do it myself")
+            Text("I have the lyrics")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Theme.tertiary)
                 .padding(.top, 18)
@@ -691,7 +854,7 @@ private struct ProcessingView: View {
 
 private struct LyricsReviewView: View {
     @Environment(AppState.self) private var app
-    @State private var editingID: LyricLine.ID?
+    @State private var editingID: LyricItem.ID?
     @State private var scrubbing = false
     @State private var showDiscardConfirm = false
 
@@ -978,7 +1141,7 @@ private struct LyricsReviewView: View {
 }
 
 private struct LyricRow: View {
-    let line: LyricLine
+    let line: LyricItem
     let isCurrent: Bool
     let isEditing: Bool
     let onTap: () -> Void
@@ -1156,28 +1319,28 @@ private struct NudgeChip: View {
 private struct ManualEntryView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
-    @State private var text: String = ""
     @FocusState private var focused: Bool
 
     var body: some View {
+        @Bindable var app = app
         ZStack {
             Theme.canvas.ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Paste lyrics")
+                Text("Your lyrics")
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Theme.primary)
                     .padding(.horizontal, 24)
                     .padding(.top, 18)
 
-                Text("One line per line. We'll handle the timing.")
+                Text("Paste the lines. Choose how they get timed.")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.tertiary)
                     .padding(.horizontal, 24)
                     .padding(.top, 6)
                     .padding(.bottom, 18)
 
-                TextEditor(text: $text)
+                TextEditor(text: $app.manualText)
                     .focused($focused)
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
@@ -1186,30 +1349,55 @@ private struct ManualEntryView: View {
                     .tint(Theme.accentA)
                     .padding(.horizontal, 20)
 
-                Button {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    app.alignPasted(text)
-                    dismiss()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "sparkles")
-                        Text("Align with audio")
-                    }
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 56)
-                    .background(Theme.accentGradient, in: Capsule())
-                    .shadow(color: Theme.accentA.opacity(0.35), radius: 24, y: 8)
-                }
-                .buttonStyle(PressableStyle())
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.35 : 1)
-                .padding(20)
+                actions
+                    .padding(20)
             }
         }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focused = true }
+        }
+    }
+
+    private var isEmpty: Bool {
+        app.manualText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var actions: some View {
+        VStack(spacing: 12) {
+            Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                let raw = app.manualText
+                dismiss()
+                Task { await app.alignWithAI(raw) }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "sparkles")
+                        .symbolEffect(.pulse, options: .repeating)
+                    Text("Align with AI")
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(Theme.accentGradient, in: Capsule())
+                .shadow(color: Theme.accentA.opacity(0.35), radius: 24, y: 8)
+            }
+            .buttonStyle(PressableStyle())
+            .disabled(isEmpty)
+            .opacity(isEmpty ? 0.35 : 1)
+
+            Button {
+                UISelectionFeedbackGenerator().selectionChanged()
+                app.manualAlign(app.manualText)
+                dismiss()
+            } label: {
+                Text("I'll time them myself")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isEmpty ? Theme.tertiary.opacity(0.4) : Theme.secondary)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .disabled(isEmpty)
         }
     }
 }
@@ -1250,6 +1438,47 @@ private struct SavedOverlay: View {
     }
 }
 
+private struct ErrorBanner: View {
+    let text: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color(red: 1.0, green: 0.65, blue: 0.45))
+            Text(text)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button {
+                UISelectionFeedbackGenerator().selectionChanged()
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Color.white.opacity(0.06), in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Theme.elevated)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color(red: 1.0, green: 0.55, blue: 0.35).opacity(0.4), lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.5), radius: 22, y: 10)
+    }
+}
+
 // MARK: - Shared bits
 
 private struct CircleIconButton: View {
@@ -1272,7 +1501,7 @@ private struct CircleIconButton: View {
 }
 
 private struct PressableStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
+    func makeBody(configuration: ButtonStyleConfiguration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .opacity(configuration.isPressed ? 0.92 : 1.0)
@@ -1322,6 +1551,185 @@ private extension UIImage {
         let factor: Double = lum > 0.55 ? 0.45 : (lum > 0.35 ? 0.62 : 0.85)
         return Color(red: r * factor, green: g * factor, blue: b * factor)
     }
+}
+
+// MARK: - LyricSync API
+
+enum LyricsAPI {
+    /// Override these from app launch when auth is wired.
+    static var userId: String = "anonymous"
+
+    static func configure(bearerToken: String?, userId: String = "anonymous") {
+        self.userId = userId
+        if let token = bearerToken {
+            ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(token)"
+        } else {
+            ApiAPIConfiguration.shared.customHeaders.removeValue(forKey: "Authorization")
+        }
+    }
+
+    /// Mode 1: lyrics == nil → server transcribes + aligns.
+    /// Mode 2: lyrics != nil → server forced-aligns user-supplied text.
+    /// Two-step: upload the audio bytes via POST /audio, then call POST /lyric_sync
+    /// referencing the server-side filename returned from the upload.
+    fileprivate static func sync(audioURL: URL, lyrics: String?) async -> [LyricItem]? {
+        guard let serverFilename = await uploadAudio(audioURL) else { return nil }
+        do {
+            let payload = LyricSync(
+                audio: serverFilename,
+                id: UUID(),
+                lyrics: lyrics ?? "",
+                userId: userId
+            )
+            let response = try await LyricSyncRouteAPI.lyricSync(
+                userId: userId,
+                upsert: LyricSyncUpsert(data: [payload])
+            )
+            guard let synced = response.upsert?.data.first,
+                  let words = synced.words,
+                  !words.isEmpty
+            else { return nil }
+            return groupWordsIntoLines(words, hint: lyrics ?? synced.lyrics)
+        } catch {
+            return nil
+        }
+    }
+
+    /// POSTs the audio bytes via /audio. Returns the server-side filename on success.
+    private static func uploadAudio(_ url: URL) async -> String? {
+        do {
+            let payload = Audio(file: url.path, id: UUID(), userId: userId)
+            let response = try await AudioRouteAPI.audio(
+                userId: userId,
+                upsert: AudioUpsert(data: [payload])
+            )
+            return response.upsert?.data.first?.file
+        } catch {
+            return nil
+        }
+    }
+
+    /// Server emits a synthetic word with `text == "\n"` after every line.
+    /// Words before each break form one `LyricItem`. Line `time` is the first
+    /// non-zero `start` in that group (zero-stamps are unaligned sentinels).
+    private static func groupWordsIntoLines(_ words: [WordAlignment], hint: String?) -> [LyricItem] {
+        var out: [LyricItem] = []
+        var buffer: [WordAlignment] = []
+        for w in words {
+            if w.text == "\n" {
+                if let line = flush(&buffer) { out.append(line) }
+            } else {
+                buffer.append(w)
+            }
+        }
+        if let line = flush(&buffer) { out.append(line) }
+        return out
+    }
+
+    private static func flush(_ buffer: inout [WordAlignment]) -> LyricItem? {
+        defer { buffer.removeAll(keepingCapacity: true) }
+        guard !buffer.isEmpty else { return nil }
+        let text = buffer.map(\.text).joined(separator: " ")
+        let time = buffer.first(where: { $0.start > 0 })?.start ?? 0
+        return LyricItem(time: time, text: text)
+    }
+}
+
+// MARK: - SYLT IO
+
+private func writeSYLT(to url: URL, lines: [LyricItem]) -> Result<Void, Error> {
+    // Work in the app sandbox tmp dir — the picked URL's parent directory
+    // (e.g. iCloud Drive) doesn't grant us write access for AudioMarker's
+    // sibling `.UUID.tmp` file. Modify in our sandbox, then copy the result
+    // back over the original through NSFileCoordinator.
+    let workURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+    defer { try? FileManager.default.removeItem(at: workURL) }
+
+    do {
+        if FileManager.default.fileExists(atPath: workURL.path) {
+            try FileManager.default.removeItem(at: workURL)
+        }
+        try FileManager.default.copyItem(at: url, to: workURL)
+    } catch {
+        print("[writeSYLT] copy to sandbox failed: \(error)")
+        return .failure(error)
+    }
+
+    let engine = AudioMarkerEngine()
+    var info: AudioFileInfo
+    do {
+        info = try engine.read(from: workURL)
+    } catch {
+        print("[writeSYLT] read failed (using empty AudioFileInfo): \(error)")
+        info = AudioFileInfo()
+    }
+
+    let amLines = lines.map { line in
+        LyricLine(
+            time: AudioTimestamp(timeInterval: line.time),
+            text: line.text
+        )
+    }
+
+    var others = info.metadata.synchronizedLyrics.filter {
+        !($0.language == "eng" && $0.contentType == .lyrics)
+    }
+    others.append(SynchronizedLyrics(
+        language: "eng",
+        contentType: .lyrics,
+        descriptor: "",
+        lines: amLines
+    ))
+    info.metadata.synchronizedLyrics = others
+
+    do {
+        try engine.modify(info, in: workURL)
+    } catch {
+        print("[writeSYLT] engine.modify failed: \(error)")
+        return .failure(error)
+    }
+
+    let coordinator = NSFileCoordinator()
+    var coordError: NSError?
+    var copyError: Error?
+    coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { coordURL in
+        do {
+            if FileManager.default.fileExists(atPath: coordURL.path) {
+                try FileManager.default.removeItem(at: coordURL)
+            }
+            try FileManager.default.copyItem(at: workURL, to: coordURL)
+        } catch {
+            print("[writeSYLT] copy back failed: \(error)")
+            copyError = error
+        }
+    }
+    if let coordError {
+        print("[writeSYLT] NSFileCoordinator failed: \(coordError)")
+        return .failure(coordError)
+    }
+    if let copyError { return .failure(copyError) }
+    return .success(())
+}
+
+private func readSYLT(from url: URL) -> [LyricItem]? {
+    let engine = AudioMarkerEngine()
+    var info: AudioFileInfo?
+    let coordinator = NSFileCoordinator()
+    var coordError: NSError?
+    coordinator.coordinate(readingItemAt: url, options: [], error: &coordError) { coordURL in
+        info = try? engine.read(from: coordURL)
+    }
+    guard coordError == nil,
+          let info,
+          let sylt = info.metadata.synchronizedLyrics
+            .first(where: { $0.contentType == .lyrics })
+    else { return nil }
+
+    let lines = sylt.lines.map { line in
+        LyricItem(time: line.time.timeInterval, text: line.text)
+    }
+    return lines.isEmpty ? nil : lines
 }
 
 #Preview {
