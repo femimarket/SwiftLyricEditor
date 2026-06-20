@@ -1,5 +1,5 @@
 {
-  "originHash" : "8d28430d7ce5ce902ed1495cb66790441dc5ebe441e26f9f90b3606b4d1b210a",
+  "originHash" : "b4efb92b198262a5aa7f8cc6f7b0d626df06ae7ef967e1bf6ae9a8964448103f",
   "pins" : [
     {
       "identity" : "id3tageditor",
@@ -26,6 +26,15 @@
       "state" : {
         "revision" : "28cf6a592a5fe8307f2b82a0ac0eff867f747401",
         "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "swiftapi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/femimarket/swiftapi",
+      "state" : {
+        "revision" : "1544d31a0478db686d982c7abd2b6e2b7d73cf22",
+        "version" : "4.2.0"
       }
     }
   ],

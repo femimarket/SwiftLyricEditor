@@ -10,12 +10,34 @@ import SwiftUI
 @main
 struct LyricEditorApp: App {
     init() {
-        // TODO: replace with real auth flow (Sign in with Apple → bearer token).
-        // Short-lived Apple ID JWT for dev wiring only. Do not commit to source control.
-        LyricsAPI.configure(
-            bearerToken: "eyJraWQiOiIxRTZWaW9JYU5JIiwiYWxnIjoiUlMyNTYifQ.eyJpc3MiOiJodHRwczovL2FwcGxlaWQuYXBwbGUuY29tIiwiYXVkIjoibWFya2V0LmZlbWkiLCJleHAiOjE3ODA4NTExMDQsImlhdCI6MTc4MDc2NDcwNCwic3ViIjoiMDAwNTM5LjFjMGFhZmZlY2NjNTQwNjI5ODc1OTliMDEwM2U2ZWNkLjExMTEiLCJjX2hhc2giOiJHNWxISE9xYWIxbzVGVXVxQjBzeEtRIiwiZW1haWwiOiJidXNpbmVzc0BmZW1pLm1hcmtldCIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJhdXRoX3RpbWUiOjE3ODA3NjQ3MDQsIm5vbmNlX3N1cHBvcnRlZCI6dHJ1ZX0.ZJ1FePgx1Qii_9QZFLj8pjRKc3OyL4ybuxgdVyTkR8Bj3W3qotB0Dl6UOWe800WIgGowg__RCdxm-c8HjUU8E1T85BNoNiwoG8cJL9HffTfyu9VFoJw6pwxw_3awIeyL8fcisfl6sxlR_MGpdQeuJGOI67fUOcEBU5uPvMA8wcNQYr5c2pEurFxjNBATVQC3Z0849tShEa1_W0eif4MGlJ_j3oBnYmrY7NIrs2PUvRhdyUQ4neqS1OUUad8rGFv3yQza4-GJ8LT4yGWkUCGTrNz__GoFvkdDmI0TtRLGNpZQYUbpzWBE_nqhPC5wAVVoF1qCmK8npfiODbvehFGXZw",
-            userId: "000539.1c0aaffeccc54062987599b0103e6ecd.1111"
-        )
+        // Bearer token comes from launch argument `-idtoken <jwt>` (Xcode scheme).
+        // Without one, fall back to the device's identifierForVendor so the server
+        // still has a stable identity to attach the request to.
+        let token = Self.argValue(for: "-idtoken") ?? UIDevice.current.identifierForVendor?.uuidString
+        LyricsAPI.configure(bearerToken: token)
+    }
+
+    private static func argValue(for flag: String) -> String? {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        let v = args[i + 1]
+        return v.isEmpty ? nil : v
+    }
+
+    /// Decode JWT `sub` claim (no signature verification — server still validates).
+    private static func subClaim(of jwt: String) -> String? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+        // Pad base64url to base64.
+        payload = payload.replacingOccurrences(of: "-", with: "+")
+                         .replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 { payload.append("=") }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sub = json["sub"] as? String
+        else { return nil }
+        return sub
     }
 
     var body: some Scene {

@@ -70,10 +70,44 @@ private struct TrackInfo: Equatable {
     }
 }
 
-private struct LyricItem: Identifiable, Equatable {
+private struct Word: Identifiable, Equatable {
     let id = UUID()
     var time: TimeInterval
     var text: String
+}
+
+private struct LyricItem: Identifiable, Equatable {
+    let id = UUID()
+    var words: [Word]
+
+    init(time: TimeInterval, text: String) {
+        self.words = [Word(time: time, text: text)]
+    }
+
+    init(words: [Word]) {
+        self.words = words
+    }
+
+    /// The line's start time. Setting it shifts every word by the same delta,
+    /// preserving relative word-level timing inside the line.
+    var time: TimeInterval {
+        get { words.first?.time ?? 0 }
+        set {
+            let delta = newValue - (words.first?.time ?? 0)
+            guard delta != 0 else { return }
+            for i in words.indices { words[i].time = max(0, words[i].time + delta) }
+        }
+    }
+
+    /// The line's display text. Setting it collapses the line to a single word
+    /// at the previous line start (word-level timing is dropped on text rewrite).
+    var text: String {
+        get { words.map(\.text).joined(separator: " ") }
+        set {
+            let start = words.first?.time ?? 0
+            words = [Word(time: start, text: newValue)]
+        }
+    }
 }
 
 @MainActor
@@ -1556,62 +1590,60 @@ private extension UIImage {
 // MARK: - LyricSync API
 
 enum LyricsAPI {
-    /// Override these from app launch when auth is wired.
     static var userId: String = "anonymous"
 
-    static func configure(bearerToken: String?, userId: String = "anonymous") {
-        self.userId = userId
+    static func configure(bearerToken: String?) {
         if let token = bearerToken {
             ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(token)"
+            userId = token
         } else {
             ApiAPIConfiguration.shared.customHeaders.removeValue(forKey: "Authorization")
+            userId = "anonymous"
         }
     }
 
     /// Mode 1: lyrics == nil → server transcribes + aligns.
     /// Mode 2: lyrics != nil → server forced-aligns user-supplied text.
-    /// Two-step: upload the audio bytes via POST /audio, then call POST /lyric_sync
-    /// referencing the server-side filename returned from the upload.
+    /// Audio bytes ride inline as raw base64 in `LyricSync.audio`.
     fileprivate static func sync(audioURL: URL, lyrics: String?) async -> [LyricItem]? {
-        guard let serverFilename = await uploadAudio(audioURL) else { return nil }
+        guard let base64 = readBase64(from: audioURL) else { return nil }
         do {
-            let payload = LyricSync(
-                audio: serverFilename,
+            let request = API(
+                action: .typeLyricSync(LyricSync(
+                    audio: base64,
+                    characters: [],
+                    lyrics: lyrics ?? "",
+                    type: .lyricSync,
+                    words: []
+                )),
+                credit: 0,
                 id: UUID(),
-                lyrics: lyrics ?? "",
+                status: .pending,
                 userId: userId
             )
-            let response = try await LyricSyncRouteAPI.lyricSync(
-                userId: userId,
-                upsert: LyricSyncUpsert(data: [payload])
-            )
-            guard let synced = response.upsert?.data.first,
-                  let words = synced.words,
-                  !words.isEmpty
-            else { return nil }
-            return groupWordsIntoLines(words, hint: lyrics ?? synced.lyrics)
+            let response = try await ApiHandlerAPI.apiHandler(API: request)
+            guard case .typeLyricSync(let synced) = response.action else { return nil }
+            let words = synced.words
+            guard !words.isEmpty else { return nil }
+            return groupWordsIntoLines(words, hint: (lyrics?.isEmpty == false) ? lyrics : synced.lyrics)
         } catch {
+            print("[LyricsAPI.sync] \(error)")
             return nil
         }
     }
 
-    /// POSTs the audio bytes via /audio. Returns the server-side filename on success.
-    private static func uploadAudio(_ url: URL) async -> String? {
+    private static func readBase64(from url: URL) -> String? {
         do {
-            let payload = Audio(file: url.path, id: UUID(), userId: userId)
-            let response = try await AudioRouteAPI.audio(
-                userId: userId,
-                upsert: AudioUpsert(data: [payload])
-            )
-            return response.upsert?.data.first?.file
+            let data = try Data(contentsOf: url)
+            return data.base64EncodedString()
         } catch {
+            print("[LyricsAPI.readBase64] \(error)")
             return nil
         }
     }
 
     /// Server emits a synthetic word with `text == "\n"` after every line.
-    /// Words before each break form one `LyricItem`. Line `time` is the first
-    /// non-zero `start` in that group (zero-stamps are unaligned sentinels).
+    /// Words before each break form one `LyricItem` carrying its individual words.
     private static func groupWordsIntoLines(_ words: [WordAlignment], hint: String?) -> [LyricItem] {
         var out: [LyricItem] = []
         var buffer: [WordAlignment] = []
@@ -1629,9 +1661,12 @@ enum LyricsAPI {
     private static func flush(_ buffer: inout [WordAlignment]) -> LyricItem? {
         defer { buffer.removeAll(keepingCapacity: true) }
         guard !buffer.isEmpty else { return nil }
-        let text = buffer.map(\.text).joined(separator: " ")
-        let time = buffer.first(where: { $0.start > 0 })?.start ?? 0
-        return LyricItem(time: time, text: text)
+        // Anchor the line at its first non-zero stamp so zero-stamps don't drag the line to t=0.
+        let anchor = buffer.first(where: { $0.start > 0 })?.start ?? 0
+        let mapped: [Word] = buffer.map { w in
+            Word(time: w.start > 0 ? w.start : anchor, text: w.text)
+        }
+        return LyricItem(words: mapped)
     }
 }
 
@@ -1665,11 +1700,22 @@ private func writeSYLT(to url: URL, lines: [LyricItem]) -> Result<Void, Error> {
         info = AudioFileInfo()
     }
 
-    let amLines = lines.map { line in
-        LyricLine(
-            time: AudioTimestamp(timeInterval: line.time),
-            text: line.text
-        )
+    // Hybrid SYLT: one entry per word, plus an empty-text "\n" entry between lines.
+    var amLines: [LyricLine] = []
+    for (lineIdx, line) in lines.enumerated() {
+        for word in line.words {
+            amLines.append(LyricLine(
+                time: AudioTimestamp(timeInterval: word.time),
+                text: word.text
+            ))
+        }
+        if lineIdx < lines.count - 1 {
+            let breakTime = line.words.last?.time ?? line.time
+            amLines.append(LyricLine(
+                time: AudioTimestamp(timeInterval: breakTime),
+                text: "\n"
+            ))
+        }
     }
 
     var others = info.metadata.synchronizedLyrics.filter {
@@ -1726,10 +1772,22 @@ private func readSYLT(from url: URL) -> [LyricItem]? {
             .first(where: { $0.contentType == .lyrics })
     else { return nil }
 
-    let lines = sylt.lines.map { line in
-        LyricItem(time: line.time.timeInterval, text: line.text)
+    // Accumulate words between "\n" markers. If the SYLT has no "\n" markers
+    // (legacy / line-only), each entry becomes its own line with one word.
+    var out: [LyricItem] = []
+    var buffer: [Word] = []
+    for entry in sylt.lines {
+        if entry.text == "\n" {
+            if !buffer.isEmpty {
+                out.append(LyricItem(words: buffer))
+                buffer.removeAll(keepingCapacity: true)
+            }
+        } else {
+            buffer.append(Word(time: entry.time.timeInterval, text: entry.text))
+        }
     }
-    return lines.isEmpty ? nil : lines
+    if !buffer.isEmpty { out.append(LyricItem(words: buffer)) }
+    return out.isEmpty ? nil : out
 }
 
 #Preview {
