@@ -1,0 +1,6 @@
+module QwenAligner {
+    header "qwen_asr.h"
+    link "qwen_asr"
+    link framework "Accelerate"
+    export *
+}

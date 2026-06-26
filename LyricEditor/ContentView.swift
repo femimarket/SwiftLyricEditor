@@ -343,16 +343,27 @@ private final class AppState {
     func runAI() async {
         guard let track else { return }
         withAnimation(.smooth(duration: 0.5)) { stage = .processing }
-        let aligned = await LyricsAPI.sync(audioURL: track.fileURL, lyrics: nil)
-        if let aligned, !aligned.isEmpty {
-            lyrics = aligned
+        do {
+            guard let transcribed = await LyricsAPI.transcribe(audioURL: track.fileURL) else {
+                throw LocalAligner.AlignerError.alignFailed
+            }
+            let cleaned = parseLyrics(transcribed)
+            guard !cleaned.isEmpty else { throw LocalAligner.AlignerError.alignFailed }
+            let aligned = try await LocalAligner.align(
+                audioURL: track.fileURL,
+                lyrics: cleaned.joined(separator: "\n")
+            )
+            let items = buildLyricItems(from: aligned, lines: cleaned)
+            guard !items.isEmpty else { throw LocalAligner.AlignerError.alignFailed }
+            lyrics = items
             playhead = 0
             isPlaying = true
             isDirty = false
             withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
-        } else {
+        } catch {
+            print("[runAI] \(error)")
             withAnimation(.spring(duration: 0.5, bounce: 0.18)) { stage = .loaded }
-            showError("Couldn't reach the AI. Try again, or use \"I have the lyrics\".")
+            showError("AI sync failed. Try again, or use \"I have the lyrics\".")
         }
     }
 
@@ -370,27 +381,47 @@ private final class AppState {
         }
     }
 
-    /// Mode 2: user provides lyrics, AI server forced-aligns timings.
+    /// Mode 2: user provides lyrics, local QwenAligner forced-aligns timings on-device.
     func alignWithAI(_ raw: String) async {
         let cleaned = parseLyrics(raw)
         guard !cleaned.isEmpty, let track else { return }
         showManual = false
         withAnimation(.smooth(duration: 0.5)) { stage = .processing }
-        let aligned = await LyricsAPI.sync(
-            audioURL: track.fileURL,
-            lyrics: cleaned.joined(separator: "\n")
-        )
-        if let aligned, !aligned.isEmpty {
-            lyrics = aligned
+        do {
+            let aligned = try await LocalAligner.align(
+                audioURL: track.fileURL,
+                lyrics: cleaned.joined(separator: "\n")
+            )
+            let items = buildLyricItems(from: aligned, lines: cleaned)
+            guard !items.isEmpty else { throw LocalAligner.AlignerError.alignFailed }
+            lyrics = items
             playhead = 0
             isPlaying = true
             isDirty = false
             manualText = ""
             withAnimation(.spring(duration: 0.7, bounce: 0.22)) { stage = .review }
-        } else {
+        } catch {
+            print("[alignWithAI] \(error)")
             withAnimation(.spring(duration: 0.5, bounce: 0.18)) { stage = .loaded }
-            showError("Couldn't reach the AI. Your lyrics are still here — try again.")
+            showError("Local alignment failed. Your lyrics are still here — try again.")
         }
+    }
+
+    /// Walks the user's lines and consumes that many aligned words per line.
+    private func buildLyricItems(from aligned: [LocalAligner.Aligned], lines: [String]) -> [LyricItem] {
+        var out: [LyricItem] = []
+        var idx = 0
+        for line in lines {
+            let tokenCount = max(1, line.split(whereSeparator: { $0.isWhitespace }).count)
+            guard idx < aligned.count else { break }
+            let endIdx = min(idx + tokenCount, aligned.count)
+            let words: [Word] = aligned[idx..<endIdx].map {
+                Word(time: $0.start_ms / 1000.0, text: $0.text)
+            }
+            if !words.isEmpty { out.append(LyricItem(words: words)) }
+            idx = endIdx
+        }
+        return out
     }
 
     /// Mode 3: user provides lyrics, takes timing into their own hands.
@@ -1602,19 +1633,16 @@ enum LyricsAPI {
         }
     }
 
-    /// Mode 1: lyrics == nil → server transcribes + aligns.
-    /// Mode 2: lyrics != nil → server forced-aligns user-supplied text.
-    /// Audio bytes ride inline as raw base64 in `LyricSync.audio`.
-    fileprivate static func sync(audioURL: URL, lyrics: String?) async -> [LyricItem]? {
+    /// Mode 1: server transcribes (Qwen3AsrFlash) → returns the lyrics text.
+    /// Alignment happens locally afterward via `LocalAligner`.
+    fileprivate static func transcribe(audioURL: URL) async -> String? {
         guard let base64 = readBase64(from: audioURL) else { return nil }
         do {
             let request = API(
-                action: .typeLyricSync(LyricSync(
+                action: .typeQwen3AsrFlash(Qwen3AsrFlash(
                     audio: base64,
-                    characters: [],
-                    lyrics: lyrics ?? "",
-                    type: .lyricSync,
-                    words: []
+                    lyrics: "",
+                    type: .qwen3AsrFlash
                 )),
                 credit: 0,
                 id: UUID(),
@@ -1622,12 +1650,11 @@ enum LyricsAPI {
                 userId: userId
             )
             let response = try await ApiHandlerAPI.apiHandler(API: request)
-            guard case .typeLyricSync(let synced) = response.action else { return nil }
-            let words = synced.words
-            guard !words.isEmpty else { return nil }
-            return groupWordsIntoLines(words, hint: (lyrics?.isEmpty == false) ? lyrics : synced.lyrics)
+            guard case .typeQwen3AsrFlash(let result) = response.action else { return nil }
+            let text = result.lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
         } catch {
-            print("[LyricsAPI.sync] \(error)")
+            print("[LyricsAPI.transcribe] \(error)")
             return nil
         }
     }

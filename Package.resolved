@@ -1,0 +1,33 @@
+{
+  "originHash" : "0b723c2a2bfda7bb472ec9b8df2fd1117158aa5454a3b57ac0472006ef575374",
+  "pins" : [
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swift-audio-marker",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/atelier-socle/swift-audio-marker",
+      "state" : {
+        "revision" : "28cf6a592a5fe8307f2b82a0ac0eff867f747401",
+        "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "swiftapi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/femimarket/swiftapi",
+      "state" : {
+        "branch" : "main",
+        "revision" : "a8ba00cc6db095168678b7afd53fdd23bc0dc232"
+      }
+    }
+  ],
+  "version" : 3
+}
