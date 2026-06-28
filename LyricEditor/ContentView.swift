@@ -344,9 +344,8 @@ private final class AppState {
         guard let track else { return }
         withAnimation(.smooth(duration: 0.5)) { stage = .processing }
         do {
-            guard let transcribed = await LyricsAPI.transcribe(audioURL: track.fileURL) else {
-                throw LocalAligner.AlignerError.alignFailed
-            }
+            let audio = try Data(contentsOf: track.fileURL)
+            let transcribed = await LyricsAPI.transcribe(audio: audio)
             let cleaned = parseLyrics(transcribed)
             guard !cleaned.isEmpty else { throw LocalAligner.AlignerError.alignFailed }
             let aligned = try await LocalAligner.align(
@@ -1621,80 +1620,20 @@ private extension UIImage {
 // MARK: - LyricSync API
 
 enum LyricsAPI {
-    static var userId: String = "anonymous"
+    static var user: String = "anonymous"
+    static var password: String = ""
 
-    static func configure(bearerToken: String?) {
-        if let token = bearerToken {
-            ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(token)"
-            userId = token
-        } else {
-            ApiAPIConfiguration.shared.customHeaders.removeValue(forKey: "Authorization")
-            userId = "anonymous"
-        }
+    static func configure(user: String, password: String) {
+        self.user = user
+        self.password = password
     }
 
     /// Mode 1: server transcribes (Qwen3AsrFlash) → returns the lyrics text.
     /// Alignment happens locally afterward via `LocalAligner`.
-    fileprivate static func transcribe(audioURL: URL) async -> String? {
-        guard let base64 = readBase64(from: audioURL) else { return nil }
-        do {
-            let request = API(
-                action: .typeQwen3AsrFlash(Qwen3AsrFlash(
-                    audio: base64,
-                    lyrics: "",
-                    type: .qwen3AsrFlash
-                )),
-                credit: 0,
-                id: UUID(),
-                status: .pending,
-                userId: userId
-            )
-            let response = try await ApiHandlerAPI.apiHandler(API: request)
-            guard case .typeQwen3AsrFlash(let result) = response.action else { return nil }
-            let text = result.lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
-        } catch {
-            print("[LyricsAPI.transcribe] \(error)")
-            return nil
-        }
+    fileprivate static func transcribe(audio: Data) async -> String {
+        await Api.qwen3AsrFlash(user: user, password: password, audio: audio)
     }
 
-    private static func readBase64(from url: URL) -> String? {
-        do {
-            let data = try Data(contentsOf: url)
-            return data.base64EncodedString()
-        } catch {
-            print("[LyricsAPI.readBase64] \(error)")
-            return nil
-        }
-    }
-
-    /// Server emits a synthetic word with `text == "\n"` after every line.
-    /// Words before each break form one `LyricItem` carrying its individual words.
-    private static func groupWordsIntoLines(_ words: [WordAlignment], hint: String?) -> [LyricItem] {
-        var out: [LyricItem] = []
-        var buffer: [WordAlignment] = []
-        for w in words {
-            if w.text == "\n" {
-                if let line = flush(&buffer) { out.append(line) }
-            } else {
-                buffer.append(w)
-            }
-        }
-        if let line = flush(&buffer) { out.append(line) }
-        return out
-    }
-
-    private static func flush(_ buffer: inout [WordAlignment]) -> LyricItem? {
-        defer { buffer.removeAll(keepingCapacity: true) }
-        guard !buffer.isEmpty else { return nil }
-        // Anchor the line at its first non-zero stamp so zero-stamps don't drag the line to t=0.
-        let anchor = buffer.first(where: { $0.start > 0 })?.start ?? 0
-        let mapped: [Word] = buffer.map { w in
-            Word(time: w.start > 0 ? w.start : anchor, text: w.text)
-        }
-        return LyricItem(words: mapped)
-    }
 }
 
 // MARK: - SYLT IO

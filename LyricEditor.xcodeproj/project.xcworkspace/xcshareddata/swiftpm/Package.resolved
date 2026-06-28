@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/femimarket/swiftapi",
       "state" : {
-        "revision" : "c49413ec2639a4294d56c44be648df2738054639",
-        "version" : "4.5.0"
+        "revision" : "168f377f346d4f36c430fc4b404101a887401212",
+        "version" : "4.8.1"
       }
     }
   ],
