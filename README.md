@@ -1,68 +1,63 @@
 # LyricEditor
 
-## Overview
-LyricEditor is an iOS application for importing audio tracks, synchronizing lyrics, and editing timed lyric lines. It supports cloud-assisted transcription, on-device forced alignment using a quantized Qwen model, and manual timing adjustments. Synchronized lyrics are saved directly into the audio file using the SYLT (Synchronized Lyrics) metadata format.
+LyricEditor is an iOS application built with SwiftUI that enables precise synchronization of lyrics to audio tracks. It supports AI-powered transcription, local forced alignment using an on-device Qwen model, manual timing adjustments, and seamless saving of synchronized lyrics back into the audio file's metadata.
 
-## Key Features
-- **Multi-Mode Sync**: Cloud transcription (`Qwen3AsrFlash`), on-device forced alignment (`QwenAligner`), or manual entry
-- **Real-Time Playback & Scrubbing**: 50ms polling loop with safe seek suppression and interruption handling
-- **Line-by-Line Editing**: Tap to play, long-press to edit, nudge/snap timing controls, and undo/restore
-- **Ambient Theming**: Dynamic background gradients extracted from album artwork using CoreImage
-- **SYLT I/O**: Reads and writes hybrid word-level + line-break markers directly into audio files
-- **Safe File I/O**: Uses `NSFileCoordinator` to prevent iCloud/external storage write conflicts
+## Features
+- **Audio Import**: Drag-and-drop or file picker support for standard audio formats.
+- **Metadata & Theming**: Auto-extracts title, artist, and artwork. Derives ambient UI colors from album art for dynamic theming.
+- **AI Sync**: Server-side transcription via Qwen3AsrFlash followed by local forced alignment.
+- **Manual Entry**: Paste lyrics and choose between AI alignment or manual timing.
+- **Real-time Editing**: Scrub playback, nudge line timings, snap to playhead, delete with a 5-second undo window.
+- **SYLT Export**: Saves word-level synchronized lyrics back into the original audio file's metadata.
 
 ## Architecture & Key Files
-| File | Purpose |
-|------|---------|
-| `LyricEditor/ContentView.swift` | Root view, `AppState` observable, stage management, playback tracking, SYLT read/write, ambient color extraction, and all UI components (`DropView`, `TrackHomeView`, `ProcessingView`, `LyricsReviewView`, etc.) |
-| `LyricEditor/LocalAligner.swift` | Swift FFI wrapper around the `QwenAligner` C library. Handles model loading, PCM decoding (16 kHz mono f32), and forced alignment via `qwen_asr_align_pcm` |
-| `LyricEditor/LyricEditorApp.swift` | App entry point. Parses CLI arguments for API credentials and initializes the SwiftUI scene |
-| `Package.swift` | Swift Package Manager configuration. Defines iOS 17+ target, SPM dependencies, and build paths |
+- `LyricEditor/ContentView.swift` — Core application logic, UI composition, state management (`AppState`), playback tracking, SYLT I/O, ambient color extraction, and all view components.
+- `LyricEditor/LocalAligner.swift` — Swift wrapper around the `QwenAligner` C FFI. Handles model loading, audio decoding (16 kHz mono f32), and forced alignment.
+- `LyricEditor/LyricEditorApp.swift` — App entry point. Parses launch arguments for API credentials and configures the `LyricsAPI`.
+- `Package.swift` — Swift Package Manager manifest defining dependencies and build configuration. Note: The SPM target excludes the app entry point, indicating this package is consumed by a host Xcode project.
 
 ## Installation & Setup
-1. **Prerequisites**: Xcode 15+, iOS 17+ device or simulator, Swift 6.0 toolchain
-2. **Clone & Open**: Open the repository in Xcode or run `swift package update`
-3. **Add QwenAligner**: The `QwenAligner` C library is distributed as an xcframework and is not included in SPM. Place it in your project and link it to the `LyricEditor` target
-4. **Bundle Model Files**: Ensure the `qwen3-aligner-0.6b` model directory (containing `vocab.json` and weights) is added to the app bundle. The app resolves the model path dynamically via `vocab.json`'s parent directory
+1. **Clone the repository** and open the host Xcode project (or use SPM to resolve dependencies).
+2. **Resolve dependencies**:
+   ```bash
+   swift package resolve
+   ```
+3. **API Credentials**: The app requires authentication for the AI transcription service. Credentials are passed at launch via command-line arguments:
+   ```bash
+   -u <username> -p <password>
+   ```
+   Configure these in your Xcode scheme under `Run > Arguments > Arguments Passed On Launch`, or modify `LyricEditorApp.swift` for development builds.
+4. **Framework Integration**: Ensure the `QwenAligner` xcframework is linked in your Xcode project. It is not managed by SPM in this repository.
 
 ## Building & Running
-- **Xcode**: Open `Package.swift` or the generated `.xcodeproj`, select a device, and run
-- **CLI**: `swift build && swift run` (requires passing API credentials via arguments; see Configuration)
-- **Permissions**: The app requests audio playback permissions automatically via `AVAudioSession`. No microphone access is required
+- **Platform**: iOS 17+
+- **Swift Version**: 6.0
+- Open the project in Xcode 15+ and build/run. The app targets the iOS simulator or physical device.
+- If building via SPM alone, note that `LyricEditorApp.swift` is excluded from the library target and must be included in a host app target.
 
-## Usage
-1. **Import Track**: Tap the waveform button or drag-and-drop an audio file (MP3, M4A, etc.)
-2. **Choose Sync Method**:
-   - **Sync**: Triggers cloud transcription → local alignment
-   - **I have the lyrics**: Opens a text editor to paste lyrics, then choose between AI alignment or manual timing
-3. **Review & Edit**: 
-   - Tap a line to play from that timestamp
-   - Long-press to edit text
-   - Use `+`/`-` chips to nudge timing, or tap the timestamp to snap to the current playhead
-   - Swipe/delete to remove lines (5-second undo window)
-4. **Save**: Taps the Save button to write SYLT metadata back to the original file. The app returns to the empty state after a brief success overlay
-
-## Configuration & API Credentials
-Cloud transcription requires authentication. Credentials are passed at launch via command-line arguments:
-```bash
-LyricEditor -u <username> -p <password>
-```
-These values are consumed in `LyricEditor/LyricEditorApp.swift` and stored in `LyricsAPI.user` and `LyricsAPI.password`. If omitted, cloud transcription will fail gracefully, but local alignment and manual editing remain fully functional.
+## Usage Guide
+1. **Import a Track**: Tap the waveform button or drop an audio file. The app extracts metadata, artwork, and ambient colors.
+2. **Sync Lyrics**:
+   - Tap **Sync** to run AI transcription + local alignment.
+   - Tap **I have the lyrics** to paste text and choose between AI alignment or manual timing.
+3. **Edit & Refine**:
+   - Play/pause and scrub the timeline.
+   - Tap a line to play it; long-press to edit text.
+   - Use the **Nudge** buttons or **Snap to Playhead** to adjust timing.
+   - Delete lines with a built-in 5-second undo window.
+4. **Save**: Tap **Save** to write the synchronized lyrics back into the audio file's SYLT metadata. The app handles iCloud/external storage safely via `NSFileCoordinator`.
 
 ## Technical Details & Conventions
-- **State Machine**: `AppState.stage` cycles through `.empty` → `.loaded` → `.processing` → `.review` → `.saved`. Transitions are guarded by animations and cleanup tasks
-- **Playback Tracking**: `startPlaybackTracking()` runs a 50ms `Task` loop. A `suppressSeek` flag prevents feedback loops when synchronizing the UI playhead with `AVAudioPlayer.currentTime`
-- **SYLT Format**: Uses a hybrid structure where each word gets a timestamp entry, and line breaks are represented by a `\n` marker at the start of the next line. This preserves word-level alignment while enabling line-level editing
-- **File Safety**: `writeSYLT()` copies the target file to a temporary sandbox path, modifies it via `AudioMarkerEngine`, then uses `NSFileCoordinator` to atomically replace the original. This avoids iCloud Drive write conflicts
-- **Model Resolution**: `LocalAligner.modelDirectoryURL` finds the model folder by locating `vocab.json` in the bundle and stepping up one directory. This works regardless of whether the model was added as a folder reference or flattened group
-- **Ambient Colors**: Extracted via `CIAreaAverage` on three horizontal bands of the album artwork. Luminance-aware dimming ensures readability against the dark canvas
+- **State Management**: Uses the `@Observable` macro (`AppState`) with `@ObservationIgnored` for non-UI tasks (players, tasks, temporary state). All state mutations occur on `@MainActor`.
+- **Playback Tracking**: A dedicated `Task` polls `AVAudioPlayer.currentTime` every 50ms. Falls back to a synthetic clock if playback fails. Handles audio session interruptions automatically.
+- **SYLT Format**: Hybrid structure with one entry per word, separated by `\n` markers for line breaks. Read/written via `swift-audio-marker`.
+- **Model Loading**: `LocalAligner` infers the model directory by locating `vocab.json` in the app bundle. The model is lazily loaded on a dedicated serial queue (`engineQueue`) to avoid blocking the main thread.
+- **File I/O Safety**: Direct writes to iCloud/external URLs are blocked by sandbox restrictions. The app copies files to a temporary directory, modifies them, then uses `NSFileCoordinator` to atomically replace the original.
+- **Ambient Theming**: Album artwork is processed via CoreImage (`CIAreaAverage`) to extract three dominant colors, adjusted for luminance, and applied as radial gradients in the UI.
+- **Lyric Data Model**: `LyricItem` groups `Word` objects. Setting `time` shifts all words in the line by the same delta. Setting `text` collapses the line to a single word at the previous start time.
 
 ## Dependencies
-| Package | Version/Source | Purpose |
-|---------|----------------|---------|
-| `swiftapi` | `main` branch | HTTP client for `Qwen3AsrFlash` cloud transcription |
-| `swift-audio-marker` | `0.1.1` | SYLT metadata reading/writing engine |
-| `QwenAligner` | xcframework (manual) | C FFI for on-device forced alignment (`qwen_asr_align_pcm`) |
-| `AVFoundation` | System | Audio playback, session management, PCM decoding |
-| `CoreImage` | System | Ambient color extraction from artwork |
-| `UniformTypeIdentifiers` | System | Audio file type filtering for document picker |
+- `swiftapi` (GitHub: `femimarket/swiftapi`) — API client for Qwen3AsrFlash transcription.
+- `swift-audio-marker` (GitHub: `atelier-socle/swift-audio-marker`) — SYLT metadata reading/writing.
+- `QwenAligner` — C FFI framework for on-device forced alignment (requires manual framework integration).
+- Apple Frameworks: `SwiftUI`, `AVFoundation`, `CoreImage`, `UniformTypeIdentifiers`, `AudioMarker`, `Api`.

@@ -1,2 +1,8 @@
 qwen3-aligner-0.6b
 .build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserdatad/
+.DS_Store
